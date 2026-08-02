@@ -1,0 +1,90 @@
+# Heliostat — auto-unzip & deploy to GitHub Pages
+# --------------------------------------------------
+# Every time you push (including when you add or replace a .zip),
+# this finds the most recently committed .zip, unzips it, locates
+# the folder containing index.html, and publishes it as your site.
+#
+# ONE-TIME SETUP after adding this file:
+#   Repo → Settings → Pages → Build and deployment →
+#   Source: "GitHub Actions"   (not "Deploy from a branch")
+
+name: Deploy site from zip
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:        # lets you re-run it manually from the Actions tab
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # full history, so we can find the newest zip
+
+      - name: Unzip the latest archive into ./site
+        run: |
+          set -e
+
+          # 1. Pick the most recently committed .zip that still exists.
+          zipfile=""
+          for f in $(git log --pretty=format: --name-only -- '*.zip' | awk 'NF' | awk '!seen[$0]++'); do
+            if [ -f "$f" ]; then zipfile="$f"; break; fi
+          done
+          # Fallback: any zip sitting in the repo.
+          if [ -z "$zipfile" ]; then
+            zipfile=$(ls -1 *.zip 2>/dev/null | head -n 1 || true)
+          fi
+
+          rm -rf site && mkdir -p site
+
+          if [ -n "$zipfile" ]; then
+            echo "Using archive: $zipfile"
+            rm -rf _unzipped && mkdir -p _unzipped
+            unzip -o "$zipfile" -d _unzipped >/dev/null
+
+            # 2. Find the folder that actually contains index.html.
+            indexpath=$(find _unzipped -name index.html | head -n 1)
+            if [ -z "$indexpath" ]; then
+              echo "::error::No index.html was found inside $zipfile"
+              exit 1
+            fi
+            cp -r "$(dirname "$indexpath")"/. site/
+          else
+            # 3. No zip at all — publish loose files from the repo root instead.
+            echo "No .zip found; publishing loose files."
+            shopt -s nullglob dotglob
+            cp -r *.html *.md .nojekyll site/ 2>/dev/null || true
+            [ -f site/index.html ] || { echo "::error::No index.html to publish."; exit 1; }
+          fi
+
+          touch site/.nojekyll     # make sure Jekyll never rewrites the files
+          echo "----- Publishing these files: -----"
+          ls -la site
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
